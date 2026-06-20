@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CBT - SMA Negeri 2 Muara Enim</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- SheetJS (xlsx) untuk Export/Import Excel -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <script>
+        // Mendefinisikan cbtApp di global scope sebelum Alpine.js diinisialisasi
+        function cbtApp() {
+            return {
+                // Alur View: 'student-login', 'admin-login', 'student-rules', 'admin-dashboard', 'exam'
+                currentView: 'student-login',
+                // Tab aktif di Dashboard Admin
+                adminTab: 'settings',
+                isAdminLoggedIn: false,
+                
+                // Form input
+                adminLoginForm: { password: '' },
+                studentLoginForm: { noPendaftaran: '' },
+                studentForm: { nama: '', noPendaftaran: '' },
+                searchQuery: '',
+
+                // Data Siswa (Default dummy, bisa diimpor & dimanipulasi)
+                students: [
+                    { noPendaftaran: 'SMAN2-001', nama: 'ACHMAD FAISAL', hasLoggedIn: false },
+                    { noPendaftaran: 'SMAN2-002', nama: 'SITI RAHMAWATI', hasLoggedIn: false },
+                    { noPendaftaran: 'SMAN2-003', nama: 'MUHAMMAD RIZKY', hasLoggedIn: false }
+                ],
+
+                // Konfigurasi Ujian default
+                config: {
+                    examDuration: 90, // menit
+                    soalLink: 'https://docs.google.com/forms/d/e/1FAIpQLSfUo8_O62Pj011VzFvK0vshGby7B_gS0L7L40V_W6Y9o3vsww/viewform?embedded=true', // link default template google form
+                    isExamActive: true,
+                    rules: '<p>1. Peserta dilarang membuka tab/aplikasi lain selama ujian berlangsung.</p><p>2. Menggunakan sistem deteksi layar penuh otomatis.</p><p><span style="color: #e11d48;"><strong>3. Melanggar aturan</strong></span> akan mengakibatkan akun terkunci otomatis.</p><p>4. Kerjakan soal dengan jujur dan mandiri.</p>',
+                    fontStyle: 'sans-serif',
+                    fontColor: '#1e293b'
+                },
+
+                // Sesi Aktif
+                currentStudent: null,
+                timerSeconds: 0,
+                timerInterval: null,
+                showFinishConfirm: false,
+                showDeleteAllConfirm: false, // Flag modal konfirmasi hapus semua
+
+                // Sistem Pencegahan Curang (Fullscreen & Warning)
+                warningsCount: 0,
+                maxWarnings: 3,
+                showWarningModal: false,
+                isBlocked: false,
+                isExamRunning: false,
+
+                // Toasts Notifikasi
+                toasts: [],
+
+                initApp() {
+                    // Ambil konfigurasi atau data siswa dari localstorage jika sudah tersimpan sebelumnya
+                    const cachedConfig = localStorage.getItem('smandu_cbt_config');
+                    if (cachedConfig) this.config = JSON.parse(cachedConfig);
+
+                    const cachedStudents = localStorage.getItem('smandu_cbt_students');
+                    if (cachedStudents) this.students = JSON.parse(cachedStudents);
+
+                    // Cek rute halaman saat pertama kali dimuat
+                    this.checkRoute();
+                    // Daftarkan event listener jika hash di URL berubah
+                    window.addEventListener('hashchange', () => this.checkRoute());
+
+                    // Setup listener resize/fullscreen untuk keamanan ujian
+                    document.addEventListener('fullscreenchange', () => this.handleFullscreenChange());
+                    document.addEventListener('webkitfullscreenchange', () => this.handleFullscreenChange());
+                    document.addEventListener('mozfullscreenchange', () => this.handleFullscreenChange());
+                    document.addEventListener('MSFullscreenChange', () => this.handleFullscreenChange());
+
+                    // Amankan dari refresh tidak sengaja sewaktu ujian
+                    window.addEventListener('beforeunload', (e) => {
+                        if (this.isExamRunning) {
+                            e.preventDefault();
+                            e.returnValue = 'Ujian sedang berlangsung! Apakah Anda yakin ingin keluar?';
+                        }
+                    });
+
+                    // Inisialisasi ikon Lucide
+                    this.$nextTick(() => lucide.createIcons());
+                },
+
+                // Mengecek hash URL untuk menentukan peran (Siswa vs Admin)
+                checkRoute() {
+                    const hash = window.location.hash;
+                    if (hash === '#admin') {
+                        if (this.isAdminLoggedIn) {
+                            this.currentView = 'admin-dashboard';
+                        } else {
+                            this.currentView = 'admin-login';
+                        }
+                    } else {
+                        // Jika bukan admin, kunci view ke ranah siswa
+                        if (this.isExamRunning) {
+                            this.currentView = 'exam';
+                        } else if (this.currentStudent) {
+                            this.currentView = 'student-rules';
+                        } else {
+                            this.currentView = 'student-login';
+                        }
+                    }
+                    this.$nextTick(() => lucide.createIcons());
+                },
+
+                // TOAST CONTROLLER
+                showToast(message, type = 'success') {
+                    const id = Date.now();
+                    this.toasts.push({ id, message, type });
+                    this.$nextTick(() => lucide.createIcons());
+                    setTimeout(() => {
+                        this.toasts = this.toasts.filter(t => t.id !== id);
+                    }, 4000);
+                },
+
+                switchView(view) {
+                    this.currentView = view;
+                    this.$nextTick(() => lucide.createIcons());
+                },
+
+                // LOGIN ADMIN
+                loginAdmin() {
+                    if (this.adminLoginForm.password === 'siapasaya') {
+                        this.isAdminLoggedIn = true;
+                        this.showToast('Login Administrator Berhasil!', 'success');
+                        this.adminLoginForm.password = '';
+                        this.currentView = 'admin-dashboard';
+                    } else {
+                        this.showToast('Password Admin salah!', 'error');
+                    }
+                },
+
+                logoutAdmin() {
+                    this.isAdminLoggedIn = false;
+                    this.currentView = 'admin-login';
+                    this.showToast('Berhasil logout dari Panel Admin', 'success');
+                },
+
+                // LOGIN SISWA
+                loginStudent() {
+                    const noPendaftaran = this.studentLoginForm.noPendaftaran.trim().toUpperCase();
+                    if (!noPendaftaran) {
+                        this.showToast('Nomor pendaftaran wajib diisi!', 'error');
+                        return;
+                    }
+
+                    // Cek status gerbang ujian global
+                    if (!this.config.isExamActive) {
+                        this.showToast('Maaf, ujian saat ini sedang ditutup oleh administrator.', 'error');
+                        return;
+                    }
+
+                    // Temukan data siswa
+                    const student = this.students.find(s => s.noPendaftaran === noPendaftaran);
+
+                    if (!student) {
+                        this.showToast('Nomor pendaftaran tidak terdaftar!', 'error');
+                        return;
+                    }
+
+                    if (student.hasLoggedIn) {
+                        this.showToast('Nomor pendaftaran ini sudah login sebelumnya! Harap hubungi admin.', 'error');
+                        return;
+                    }
+
+                    // Sesi disetujui, arahkan ke lembar Tata Tertib
+                    this.currentStudent = student;
+                    this.switchView('student-rules');
+                    this.showToast('Identitas terverifikasi!', 'success');
+                },
+
+                logoutStudent() {
+                    this.currentStudent = null;
+                    this.studentLoginForm.noPendaftaran = '';
+                    this.switchView('student-login');
+                },
+
+                // SISTEM UJIAN (START & FINISH)
+                startExam() {
+                    // Update status login siswa di dalam database (hanya boleh login sekali)
+                    const index = this.students.findIndex(s => s.noPendaftaran === this.currentStudent.noPendaftaran);
+                    if (index !== -1) {
+                        this.students[index].hasLoggedIn = true;
+                        localStorage.setItem('smandu_cbt_students', JSON.stringify(this.students));
+                    }
+
+                    this.switchView('exam');
+                    this.isExamRunning = true;
+                    this.warningsCount = 0;
+                    this.showWarningModal = false;
+                    this.isBlocked = false;
+
+                    // Hitung Mundur Waktu Ujian
+                    this.timerSeconds = this.config.examDuration * 60;
+                    this.startTimer();
+
+                    // Minta mode Fullscreen secara eksplisit
+                    this.requestFullscreen();
+                },
+
+                startTimer() {
+                    if (this.timerInterval) clearInterval(this.timerInterval);
+                    this.timerInterval = setInterval(() => {
+                        if (this.timerSeconds > 0) {
+                            this.timerSeconds--;
+                        } else {
+                            this.finishExamForce();
+                        }
+                    }, 1000);
+                },
+
+                formatTime(seconds) {
+                    const hrs = Math.floor(seconds / 3600);
+                    const mins = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+                    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                },
+
+                requestFullscreen() {
+                    const elem = document.documentElement;
+                    if (elem.requestFullscreen) {
+                        elem.requestFullscreen();
+                    } else if (elem.webkitRequestFullscreen) { /* Safari */
+                        elem.webkitRequestFullscreen();
+                    } else if (elem.msRequestFullscreen) { /* IE11 */
+                        elem.msRequestFullscreen();
+                    }
+                },
+
+                exitFullscreen() {
+                    if (document.exitFullscreen) {
+                        document.exitFullscreen();
+                    } else if (document.webkitExitFullscreen) {
+                        document.webkitExitFullscreen();
+                    } else if (document.msExitFullscreen) {
+                        document.msExitFullscreen();
+                    }
+                },
+
+                // DETEKSI KELUAR FULLSCREEN & CHEATING
+                handleFullscreenChange() {
+                    if (this.currentView !== 'exam') return;
+
+                    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+
+                    if (!isFullscreen && !this.isBlocked) {
+                        // Siswa melanggar, keluar dari fullscreen
+                        this.warningsCount++;
+                        if (this.warningsCount >= this.maxWarnings) {
+                            // Melebihi jatah melanggar, kunci akun
+                            this.isBlocked = true;
+                            this.showWarningModal = false;
+                            this.isExamRunning = false;
+                            clearInterval(this.timerInterval);
+                            this.exitFullscreen();
+                        } else {
+                            // Munculkan notifikasi warning agar fullscreen ulang
+                            this.showWarningModal = true;
+                            this.$nextTick(() => lucide.createIcons());
+                        }
+                    }
+                },
+
+                reEnterFullscreen() {
+                    this.showWarningModal = false;
+                    this.requestFullscreen();
+                },
+
+                logoutStudentForce() {
+                    this.isBlocked = false;
+                    this.currentStudent = null;
+                    this.studentLoginForm.noPendaftaran = '';
+                    this.switchView('student-login');
+                },
+
+                finishExam() {
+                    this.showFinishConfirm = false;
+                    this.exitFullscreen();
+                    this.isExamRunning = false;
+                    clearInterval(this.timerInterval);
+                    this.showToast('Ujian telah selesai dikerjakan! Terima kasih.', 'success');
+                    this.currentStudent = null;
+                    this.studentLoginForm.noPendaftaran = '';
+                    this.switchView('student-login');
+                },
+
+                finishExamForce() {
+                    this.exitFullscreen();
+                    this.isExamRunning = false;
+                    clearInterval(this.timerInterval);
+                    this.showToast('Waktu pengerjaan ujian Anda sudah habis!', 'error');
+                    this.currentStudent = null;
+                    this.studentLoginForm.noPendaftaran = '';
+                    this.switchView('student-login');
+                },
+
+                // FITUR MANAJEMEN ADMIN
+                toggleExamStatus(isActive) {
+                    this.config.isExamActive = isActive;
+                    this.showToast(isActive ? 'Ujian telah dibuka untuk umum.' : 'Ujian ditutup sementara.', 'success');
+                },
+
+                saveSettings() {
+                    localStorage.setItem('smandu_cbt_config', JSON.stringify(this.config));
+                    this.showToast('Konfigurasi berhasil disimpan!', 'success');
+                },
+
+                filteredStudents() {
+                    if (!this.searchQuery) return this.students;
+                    const query = this.searchQuery.toLowerCase();
+                    return this.students.filter(st => 
+                        st.nama.toLowerCase().includes(query) || 
+                        st.noPendaftaran.toLowerCase().includes(query)
+                    );
+                },
+
+                addStudentManual() {
+                    const nama = this.studentForm.nama.trim().toUpperCase();
+                    const noPendaftaran = this.studentForm.noPendaftaran.trim().toUpperCase();
+
+                    if (!nama || !noPendaftaran) {
+                        this.showToast('Nama dan No. Pendaftaran wajib diisi!', 'error');
+                        return;
+                    }
+
+                    // Cek duplikasi
+                    if (this.students.some(s => s.noPendaftaran === noPendaftaran)) {
+                        this.showToast('Nomor pendaftaran sudah terdaftar!', 'error');
+                        return;
+                    }
+
+                    this.students.push({
+                        noPendaftaran,
+                        nama,
+                        hasLoggedIn: false
+                    });
+
+                    localStorage.setItem('smandu_cbt_students', JSON.stringify(this.students));
+                    this.showToast(`Siswa ${nama} berhasil ditambahkan!`, 'success');
+
+                    // Reset form
+                    this.studentForm.nama = '';
+                    this.studentForm.noPendaftaran = '';
+                },
+
+                resetStudentLogin(noPendaftaran) {
+                    const index = this.students.findIndex(s => s.noPendaftaran === noPendaftaran);
+                    if (index !== -1) {
+                        this.students[index].hasLoggedIn = false;
+                        localStorage.setItem('smandu_cbt_students', JSON.stringify(this.students));
+                        this.showToast('Status login siswa berhasil di-reset!', 'success');
+                    }
+                },
+
+                deleteStudent(noPendaftaran) {
+                    this.students = this.students.filter(s => s.noPendaftaran !== noPendaftaran);
+                    localStorage.setItem('smandu_cbt_students', JSON.stringify(this.students));
+                    this.showToast('Data siswa berhasil dihapus!', 'success');
+                },
+
+                deleteAllStudents() {
+                    this.students = [];
+                    localStorage.setItem('smandu_cbt_students', JSON.stringify([]));
+                    this.showDeleteAllConfirm = false;
+                    this.showToast('Semua data siswa berhasil dihapus!', 'success');
+                },
+
+                applyStyle(command, value = null) {
+                    document.execCommand(command, false, value);
+                    const editor = document.getElementById('rules-editor');
+                    if (editor) {
+                        this.config.rules = editor.innerHTML;
+                    }
+                },
+
+                // EXPORT TEMPLATE EXCEL & IMPORT EXCEL VIA SHEETJS
+                downloadTemplate() {
+                    const headers = [["No Pendaftaran", "Nama"]];
+                    const dummyData = [
+                        ["SMAN2-101", "RIAN PRASETYA"],
+                        ["SMAN2-102", "DINA AMALIA"],
+                        ["SMAN2-103", "HERI KURNIAWAN"]
+                    ];
+
+                    const ws = XLSX.utils.aoa_to_sheet([...headers, ...dummyData]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "Siswa Baru SMAN 2");
+
+                    // Unduh File
+                    XLSX.writeFile(wb, "Template_Siswa_SMAN2_MuaraEnim.xlsx");
+                    this.showToast('Template Excel berhasil diunduh.', 'success');
+                },
+
+                importExcel(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        
+                        // Parse as JSON array of arrays
+                        const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        
+                        if (rawData.length < 2) {
+                            this.showToast('Berkas Excel kosong atau tidak sesuai template!', 'error');
+                            return;
+                        }
+
+                        // Verifikasi Header kolom 1 & 2
+                        const header1 = rawData[0][0]?.toString().trim().toLowerCase();
+                        const header2 = rawData[0][1]?.toString().trim().toLowerCase();
+
+                        if (!header1.includes('pendaftaran') || !header2.includes('nama')) {
+                            this.showToast('Judul kolom tidak valid! Gunakan template asli.', 'error');
+                            return;
+                        }
+
+                        let countAdded = 0;
+                        let countSkipped = 0;
+
+                        // Tambahkan data ke dalam database siswa
+                        for (let i = 1; i < rawData.length; i++) {
+                            const row = rawData[i];
+                            if (!row || row.length < 2) continue;
+
+                            const noPendaftaran = row[0]?.toString().trim().toUpperCase();
+                            const nama = row[1]?.toString().trim().toUpperCase();
+
+                            if (!noPendaftaran || !nama) continue;
+
+                            // Cek duplikasi no pendaftaran
+                            if (this.students.some(s => s.noPendaftaran === noPendaftaran)) {
+                                countSkipped++;
+                                continue;
+                            }
+
+                            this.students.push({
+                                noPendaftaran,
+                                nama,
+                                hasLoggedIn: false
+                            });
+                            countAdded++;
+                        }
+
+                        localStorage.setItem('smandu_cbt_students', JSON.stringify(this.students));
+                        this.showToast(`Impor Sukses! ${countAdded} siswa baru terdaftar. (${countSkipped} dilewati karena sudah ada)`, 'success');
+                        
+                        // Reset input file
+                        event.target.value = '';
+                    };
+                    reader.readAsArrayBuffer(file);
+                }
+            };
+        }
+    </script>
+
+    <!-- Alpine.js -->
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <style>
+        [x-cloak] { display: none !important; }
+        iframe {
+            width: 100% !important;
+            height: 100% !important;
+            min-height: calc(100vh - 100px);
+            border: none;
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 font-sans antialiased text-slate-800" x-data="cbtApp()" x-init="initApp()">
+
+    <!-- NOTIFIKASI TOAST (Sistem Pesan Kustom) -->
+    <div class="fixed top-5 right-5 z-50 space-y-2 pointer-events-none">
+        <template x-for="toast in toasts" :key="toast.id">
+            <div class="flex items-center p-4 rounded-lg shadow-lg text-white max-w-sm transition-all duration-300 transform translate-y-0 pointer-events-auto"
+                 :class="toast.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'">
+                <span class="mr-2" x-html="toast.type === 'success' ? '<i data-lucide=\'check-circle\' class=\'w-5 h-5\'></i>' : '<i data-lucide=\'alert-triangle\' class=\'w-5 h-5\'></i>'"></span>
+                <span class="text-sm font-medium" x-text="toast.message"></span>
+            </div>
+        </template>
+    </div>
+
+    <!-- MODAL KONFIRMASI HAPUS SEMUA SISWA -->
+    <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" x-show="showDeleteAllConfirm" x-cloak>
+        <div class="bg-white rounded-2xl max-w-md w-full p-6 text-center text-slate-800 shadow-2xl">
+            <div class="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i data-lucide="trash" class="w-10 h-10 text-rose-600"></i>
+            </div>
+            <h3 class="text-xl font-bold text-slate-800 mb-2">Hapus Semua Data Siswa?</h3>
+            <p class="text-slate-600 mb-6">Tindakan ini tidak dapat dibatalkan. Semua data pendaftaran siswa yang ada di sistem akan dihapus secara permanen.</p>
+            <div class="flex gap-3">
+                <button @click="showDeleteAllConfirm = false" class="w-1/2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 rounded-xl transition">
+                    Batal
+                </button>
+                <button @click="deleteAllStudents()" class="w-1/2 bg-rose-600 hover:bg-rose-700 text-white font-bold py-3 rounded-xl transition shadow-lg">
+                    Ya, Hapus Semua
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL PERINGATAN FULLSCREEN -->
+    <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" x-show="showWarningModal" x-cloak>
+        <div class="bg-white rounded-2xl max-w-md w-full p-6 text-center shadow-2xl border-4 border-rose-600">
+            <div class="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i data-lucide="alert-octagon" class="w-10 h-10 text-rose-600"></i>
+            </div>
+            <h3 class="text-xl font-bold text-rose-700 mb-2">Peringatan Pelanggaran!</h3>
+            <p class="text-slate-600 mb-6">Anda terdeteksi mencoba keluar dari mode ujian (menyebelah/keluar jendela fullscreen). Harap tetap berada di mode ujian!</p>
+            <div class="p-3 bg-rose-50 rounded-lg mb-6 border border-rose-100">
+                <span class="text-sm font-semibold text-rose-800">Jumlah Toleransi Tersisa: <span class="text-lg" x-text="maxWarnings - warningsCount"></span> kali</span>
+            </div>
+            <button @click="reEnterFullscreen()" class="w-full bg-rose-600 hover:bg-rose-700 text-white font-semibold py-3 px-6 rounded-xl shadow-lg transition-all">
+                Kembali ke Ujian (Kembali Fullscreen)
+            </button>
+        </div>
+    </div>
+
+    <!-- MODAL BLOCKED (KARENA JATAH PERINGATAN HABIS) -->
+    <div class="fixed inset-0 bg-black/95 backdrop-blur-md z-50 flex items-center justify-center p-4" x-show="isBlocked" x-cloak>
+        <div class="bg-white rounded-2xl max-w-md w-full p-8 text-center shadow-2xl border-t-8 border-rose-600">
+            <div class="w-20 h-20 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i data-lucide="lock" class="w-12 h-12 text-rose-600"></i>
+            </div>
+            <h3 class="text-2xl font-bold text-slate-800 mb-2">Akses Ujian Dikunci!</h3>
+            <p class="text-slate-600 mb-6">Anda telah melebihi batas toleransi keluar dari halaman ujian. Hubungi pengawas/administrator untuk me-reset ujian Anda.</p>
+            <div class="text-sm bg-slate-100 p-3 rounded-lg font-mono text-slate-700 mb-6">
+                Nama: <span x-text="currentStudent ? currentStudent.nama : ''"></span><br>
+                No: <span x-text="currentStudent ? currentStudent.noPendaftaran : ''"></span>
+            </div>
+            <button @click="logoutStudentForce()" class="w-full bg-slate-700 hover:bg-slate-800 text-white font-semibold py-3 px-6 rounded-xl transition-all">
+                Keluar ke Halaman Login
+            </button>
+        </div>
+    </div>
+
+    <!-- MAIN INTERFACE -->
+    <div class="min-h-screen flex flex-col">
+        
+        <!-- HEADER UTAMA (HANYA MUNCUL DI SISI SISWA DILUAR MODE EXAM) -->
+        <header class="bg-blue-900 text-white py-4 px-6 shadow-md flex justify-between items-center" x-show="currentView !== 'exam' && currentView !== 'admin-dashboard' && currentView !== 'admin-login'" x-cloak>
+            <div class="flex items-center gap-3">
+                <div class="w-12 h-12 bg-white rounded-full flex items-center justify-center overflow-hidden border-2 border-yellow-400">
+                    <img src="https://iili.io/CzNJX49.png" alt="Logo SMAN 2 Muara Enim" class="w-10 h-10 object-contain" onerror="this.onerror=null; this.src='https://placehold.co/40x40/003366/ffffff?text=SMAN2'">
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-wide">CBT Online</h1>
+                    <p class="text-xs text-blue-200">SMA Negeri 2 Muara Enim</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- HEADER KHUSUS PORTAL ADMIN (HANYA DI AKSES #admin) -->
+        <header class="bg-indigo-900 text-white py-4 px-6 shadow-md flex justify-between items-center" x-show="currentView === 'admin-login'" x-cloak>
+            <div class="flex items-center gap-3">
+                <div class="w-12 h-12 bg-white rounded-full flex items-center justify-center overflow-hidden border-2 border-indigo-400">
+                    <img src="https://iili.io/CzNJX49.png" alt="Logo SMAN 2 Muara Enim" class="w-10 h-10 object-contain" onerror="this.onerror=null; this.src='https://placehold.co/40x40/003366/ffffff?text=SMAN2'">
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-wide">Portal Administrasi</h1>
+                    <p class="text-xs text-indigo-200">SMA Negeri 2 Muara Enim</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- CONTAINER UNTUK VIEW BERBEDA -->
+        <main class="flex-grow flex flex-col justify-stretch">
+            
+            <!-- 1. Halaman Login Siswa -->
+            <div class="flex-grow flex items-center justify-center p-4 bg-gradient-to-tr from-slate-100 to-blue-50" x-show="currentView === 'student-login'" x-cloak>
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-100 max-w-md w-full overflow-hidden">
+                    <div class="bg-blue-900 p-6 text-white text-center">
+                        <h2 class="text-xl font-bold">Ujian Online Siswa</h2>
+                        <p class="text-xs text-blue-200 mt-1">Masukkan Nomor Pendaftaran Resmi Anda</p>
+                    </div>
+                    <div class="p-6 space-y-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Nomor Pendaftaran</label>
+                            <input type="text" x-model="studentLoginForm.noPendaftaran" placeholder="Contoh: SMAN2-001" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold tracking-wider placeholder:normal-case">
+                        </div>
+                        <button @click="loginStudent()" class="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-900 font-bold py-3 rounded-xl transition duration-150 shadow-lg shadow-yellow-500/20">
+                            Masuk & Baca Tata Tertib
+                        </button>
+                        <div class="text-center text-xs text-slate-400">
+                            Hanya nomor terdaftar yang dapat mengikuti ujian.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. Halaman Login Admin (Hanya bisa dibuka via #admin) -->
+            <div class="flex-grow flex items-center justify-center p-4 bg-gradient-to-tr from-slate-100 to-indigo-50" x-show="currentView === 'admin-login'" x-cloak>
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-100 max-w-md w-full overflow-hidden">
+                    <div class="bg-indigo-900 p-6 text-white text-center">
+                        <h2 class="text-xl font-bold">Autentikasi Administrator</h2>
+                        <p class="text-xs text-indigo-200 mt-1">Masukkan kunci pengaman admin</p>
+                    </div>
+                    <div class="p-6 space-y-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Password Admin</label>
+                            <input type="password" x-model="adminLoginForm.password" placeholder="Masukkan password" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold">
+                        </div>
+                        <button @click="loginAdmin()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl transition duration-150 shadow-lg shadow-indigo-600/20">
+                            Masuk Dashboard
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. Halaman Tata Tertib (Sebelum Ujian Mulai) -->
+            <div class="flex-grow flex items-center justify-center p-4 bg-gradient-to-tr from-slate-50 to-blue-50" x-show="currentView === 'student-rules'" x-cloak>
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-100 max-w-2xl w-full overflow-hidden flex flex-col my-6">
+                    <div class="bg-blue-950 text-white p-6">
+                        <h2 class="text-xl font-bold">Konfirmasi Data & Tata Tertib</h2>
+                        <p class="text-xs text-blue-200 mt-1">Silakan baca instruksi sebelum memulai ujian</p>
+                    </div>
+                    <!-- Data Diri Siswa -->
+                    <div class="bg-blue-50 p-4 border-b border-blue-100 grid grid-cols-2 gap-4">
+                        <div>
+                            <span class="text-xs text-blue-600 block uppercase font-bold tracking-wider">Nama Peserta</span>
+                            <span class="text-base font-bold text-slate-800" x-text="currentStudent ? currentStudent.nama : ''"></span>
+                        </div>
+                        <div>
+                            <span class="text-xs text-blue-600 block uppercase font-bold tracking-wider">No Pendaftaran</span>
+                            <span class="text-base font-semibold font-mono text-slate-800" x-text="currentStudent ? currentStudent.noPendaftaran : ''"></span>
+                        </div>
+                    </div>
+                    <!-- Tampilan Tata Tertib dengan Custom Font & Color -->
+                    <div class="p-6 overflow-y-auto max-h-96" :style="'font-family: ' + config.fontStyle + '; color: ' + config.fontColor">
+                        <h3 class="text-lg font-bold mb-3 border-b pb-1">TATA TERTIB PENGERJAAN SOAL</h3>
+                        <div class="leading-relaxed" x-html="config.rules"></div>
+                    </div>
+                    <!-- Footer start ujian -->
+                    <div class="p-6 bg-slate-50 border-t border-slate-100 space-y-3">
+                        <div class="flex items-start gap-2 bg-yellow-50 p-3 rounded-lg border border-yellow-200 text-yellow-800 text-xs">
+                            <i data-lucide="info" class="w-4 h-4 shrink-0 mt-0.5"></i>
+                            <p>Dengan mengklik tombol mulai, layar akan otomatis masuk mode <strong>Fullscreen</strong>. Jika Anda mencoba keluar atau berpindah tab, aktivitas Anda akan direkam sebagai pelanggaran.</p>
+                        </div>
+                        <div class="flex gap-3">
+                            <button @click="logoutStudent()" class="w-1/3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-3 rounded-xl transition">
+                                Batalkan
+                            </button>
+                            <button @click="startExam()" class="w-2/3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition shadow-lg shadow-emerald-600/20">
+                                Mulai Ujian Sekarang
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. Halaman Dashboard Admin (Menu di samping kiri) -->
+            <div class="flex-grow flex" x-show="currentView === 'admin-dashboard'" x-cloak>
+                <!-- SIDEBAR KIRI -->
+                <aside class="w-80 bg-indigo-950 text-indigo-100 flex flex-col shrink-0 border-r border-indigo-900 shadow-xl">
+                    <div class="p-6 border-b border-indigo-900 flex justify-between items-center">
+                        <div class="flex items-center gap-2">
+                            <img src="https://iili.io/CzNJX49.png" alt="Logo SMAN 2" class="w-8 h-8 object-contain">
+                            <div>
+                                <h3 class="font-bold text-white leading-tight">Admin CBT</h3>
+                                <p class="text-[10px] text-indigo-400">SMAN 2 Muara Enim</p>
+                            </div>
+                        </div>
+                        <button @click="logoutAdmin()" class="p-2 hover:bg-indigo-900 rounded-lg text-rose-400" title="Log Out Admin">
+                            <i data-lucide="log-out" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <!-- Menu List -->
+                    <nav class="flex-grow p-4 space-y-1 overflow-y-auto">
+                        <button @click="adminTab = 'settings'; $nextTick(() => lucide.createIcons())" :class="adminTab === 'settings' ? 'bg-indigo-800 text-white font-bold' : 'hover:bg-indigo-900/50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm transition">
+                            <i data-lucide="settings" class="w-4 h-4"></i>
+                            Konfigurasi Ujian
+                        </button>
+                        <button @click="adminTab = 'rules'; $nextTick(() => lucide.createIcons())" :class="adminTab === 'rules' ? 'bg-indigo-800 text-white font-bold' : 'hover:bg-indigo-900/50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm transition">
+                            <i data-lucide="scroll" class="w-4 h-4"></i>
+                            Tata Tertib & Tampilan
+                        </button>
+                        <button @click="adminTab = 'students'; $nextTick(() => lucide.createIcons())" :class="adminTab === 'students' ? 'bg-indigo-800 text-white font-bold' : 'hover:bg-indigo-900/50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm transition">
+                            <i data-lucide="users" class="w-4 h-4"></i>
+                            Kelola Data Siswa
+                        </button>
+                        <button @click="adminTab = 'import'; $nextTick(() => lucide.createIcons())" :class="adminTab === 'import' ? 'bg-indigo-800 text-white font-bold' : 'hover:bg-indigo-900/50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm transition">
+                            <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+                            Impor Excel / Template
+                        </button>
+                    </nav>
+                    <!-- Status Ringkasan Ujian Global -->
+                    <div class="p-4 bg-indigo-900/30 m-4 rounded-xl border border-indigo-900">
+                        <span class="text-xs uppercase text-indigo-400 font-bold tracking-wider">Status Ujian Saat Ini</span>
+                        <div class="mt-2 flex items-center gap-2">
+                            <span class="w-3 h-3 rounded-full animate-ping" :class="config.isExamActive ? 'bg-emerald-500' : 'bg-rose-500'"></span>
+                            <span class="text-sm font-bold text-white" x-text="config.isExamActive ? 'AKTIF (Dapat Diakses)' : 'DITUTUP'"></span>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- AREA CONTENT DASHBOARD ADMIN -->
+                <main class="flex-grow p-8 overflow-y-auto max-w-6xl">
+                    
+                    <!-- TAB 1: KONFIGURASI UJIAN (Setting Waktu, Link Soal, Buka/Tutup) -->
+                    <div x-show="adminTab === 'settings'" class="space-y-6">
+                        <div class="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-slate-800">Konfigurasi Ujian</h2>
+                                <p class="text-sm text-slate-500">Atur ketersediaan ujian, link soal Google Form, dan waktu pengerjaan.</p>
+                            </div>
+                        </div>
+
+                        <!-- Panel Tombol Buka/Tutup Ujian -->
+                        <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+                            <div class="space-y-1">
+                                <h3 class="text-lg font-bold text-slate-800">Status Gerbang Ujian</h3>
+                                <p class="text-sm text-slate-500">Aktifkan untuk mengizinkan siswa mengakses pengerjaan ujian.</p>
+                            </div>
+                            <div class="flex gap-3 shrink-0">
+                                <button @click="toggleExamStatus(true)" :class="config.isExamActive ? 'bg-emerald-600 border-2 border-emerald-700 shadow-emerald-100' : 'bg-slate-200 border-2 border-slate-300 text-slate-600'" class="px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition shadow-lg">
+                                    <i data-lucide="check-circle" class="w-5 h-5"></i> Buka Ujian
+                                </button>
+                                <button @click="toggleExamStatus(false)" :class="!config.isExamActive ? 'bg-rose-600 border-2 border-rose-700 shadow-rose-100 text-white' : 'bg-slate-200 border-2 border-slate-300 text-slate-600'" class="px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition shadow-lg">
+                                    <i data-lucide="x-circle" class="w-5 h-5"></i> Tutup Ujian
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Durasi Waktu Ujian -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+                                <div class="flex items-center gap-3 text-indigo-600">
+                                    <i data-lucide="clock" class="w-6 h-6"></i>
+                                    <h3 class="text-lg font-bold text-slate-800">Atur Waktu Ujian</h3>
+                                </div>
+                                <hr>
+                                <div>
+                                    <label class="block text-sm font-semibold text-slate-700 mb-2">Durasi Ujian (Dalam Menit)</label>
+                                    <div class="flex items-center gap-3">
+                                        <input type="number" x-model.number="config.examDuration" min="1" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-lg font-semibold text-slate-800">
+                                        <span class="text-slate-500 font-semibold shrink-0">Menit</span>
+                                    </div>
+                                    <p class="text-xs text-slate-400 mt-2">Format harus angka murni lebih besar dari 0.</p>
+                                </div>
+                            </div>
+
+                            <!-- Link Soal Google Form -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+                                <div class="flex items-center gap-3 text-indigo-600">
+                                    <i data-lucide="link" class="w-6 h-6"></i>
+                                    <h3 class="text-lg font-bold text-slate-800">Link Soal Ujian (Google Form)</h3>
+                                </div>
+                                <hr>
+                                <div>
+                                    <label class="block text-sm font-semibold text-slate-700 mb-2">Link Google Form / iframe</label>
+                                    <input type="url" x-model="config.soalLink" placeholder="https://docs.google.com/forms/d/e/.../viewform" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm">
+                                    <p class="text-xs text-slate-400 mt-2">Pastikan link dapat diakses secara publik dan mendukung mode iframe (Link "Kirim" atau Link Preview).</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end">
+                            <button @click="saveSettings()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg shadow-indigo-600/20 transition">
+                                Simpan Konfigurasi
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- TAB 2: TATA TERTIB & TAMPILAN -->
+                    <div x-show="adminTab === 'rules'" class="space-y-6">
+                        <div class="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-slate-800">Tata Tertib & Kustomisasi Tampilan</h2>
+                                <p class="text-sm text-slate-500">Tentukan syarat pengerjaan dan sesuaikan styling teks tata tertib.</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <!-- Kiri: Editor Tata Tertib dan Styling -->
+                            <div class="space-y-6">
+                                <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+                                    <h3 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                        <i data-lucide="align-left" class="text-indigo-600"></i> Editor Tata Tertib
+                                    </h3>
+                                    <hr>
+                                    <div>
+                                        <div class="flex flex-wrap gap-2 items-center p-2 bg-slate-100 border border-slate-300 rounded-t-lg">
+                                            <button @click="applyStyle('bold')" class="p-1.5 hover:bg-slate-200 rounded text-slate-700 font-bold" title="Tebal">B</button>
+                                            <button @click="applyStyle('italic')" class="p-1.5 hover:bg-slate-200 rounded text-slate-700 italic" title="Miring">I</button>
+                                            <button @click="applyStyle('underline')" class="p-1.5 hover:bg-slate-200 rounded text-slate-700 underline" title="Garis Bawah">U</button>
+                                            <div class="h-6 w-px bg-slate-300 mx-1"></div>
+                                            
+                                            <!-- Pilihan Ukuran Font -->
+                                            <select @change="applyStyle('fontSize', $event.target.value)" class="px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-700">
+                                                <option value="">Ukuran...</option>
+                                                <option value="2">Kecil</option>
+                                                <option value="3">Normal</option>
+                                                <option value="4">Sedang</option>
+                                                <option value="5">Besar</option>
+                                                <option value="6">Sangat Besar</option>
+                                            </select>
+                                            
+                                            <div class="h-6 w-px bg-slate-300 mx-1"></div>
+                                            
+                                            <!-- Input Warna Teks -->
+                                            <div class="flex items-center gap-1.5">
+                                                <span class="text-xs text-slate-600 font-semibold">Warna:</span>
+                                                <input type="color" @input="applyStyle('foreColor', $event.target.value)" class="w-8 h-7 border rounded cursor-pointer">
+                                            </div>
+                                        </div>
+                                        <!-- Editor contenteditable -->
+                                        <div id="rules-editor" 
+                                             contenteditable="true" 
+                                             @blur="config.rules = $el.innerHTML"
+                                             @input="config.rules = $el.innerHTML"
+                                             class="w-full min-h-[250px] p-4 border border-t-0 border-slate-300 rounded-b-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-800 overflow-y-auto"
+                                             x-html="config.rules">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+                                    <h3 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                        <i data-lucide="palette" class="text-indigo-600"></i> Kustomisasi Font & Warna
+                                    </h3>
+                                    <hr>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-sm font-semibold text-slate-700 mb-1">Pilih Jenis Font</label>
+                                            <select x-model="config.fontStyle" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                                                <option value="sans-serif">Sans-Serif (Modern / Bersih)</option>
+                                                <option value="serif">Serif (Formal / Klasik)</option>
+                                                <option value="monospace">Monospace (Lebar Tetap / Kaku)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label class="block text-sm font-semibold text-slate-700 mb-1">Warna Font</label>
+                                            <div class="flex gap-2 items-center">
+                                                <input type="color" x-model="config.fontColor" class="w-12 h-10 border rounded-lg overflow-hidden cursor-pointer">
+                                                <input type="text" x-model="config.fontColor" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm uppercase">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Kanan: Preview Real-time Tata Tertib -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col justify-stretch">
+                                <div class="flex justify-between items-center border-b pb-3 mb-4">
+                                    <h3 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                        <i data-lucide="eye" class="text-emerald-600"></i> Preview Tata Tertib (Sisi Siswa)
+                                    </h3>
+                                    <span class="text-xs font-semibold px-2.5 py-1 bg-slate-100 rounded-full text-slate-500">Real-time</span>
+                                </div>
+                                <div class="flex-grow p-6 border border-dashed border-slate-200 rounded-xl bg-slate-50 overflow-y-auto max-h-[480px]">
+                                    <div :style="'font-family: ' + config.fontStyle + '; color: ' + config.fontColor">
+                                        <h4 class="text-lg font-bold mb-3">TATA TERTIB PENGERJAAN SOAL</h4>
+                                        <div class="leading-relaxed text-sm" x-html="config.rules"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end">
+                            <button @click="saveSettings()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg shadow-indigo-600/20 transition">
+                                Simpan Tata Tertib & Desain
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- TAB 3: KELOLA DATA SISWA MANUAL (Tambah, Reset Login, Hapus) -->
+                    <div x-show="adminTab === 'students'" class="space-y-6">
+                        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-slate-800">Kelola Data Peserta</h2>
+                                <p class="text-sm text-slate-500">Daftarkan siswa baru atau atur kelayakan login peserta.</p>
+                            </div>
+                            <span class="text-sm bg-indigo-50 text-indigo-700 font-bold px-4 py-2 rounded-xl border border-indigo-100">
+                                Total Siswa Terdaftar: <span x-text="students.length" class="text-lg"></span>
+                            </span>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            <!-- Input Form Tambah Siswa Baru Manual -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm h-fit space-y-4">
+                                <h3 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                    <i data-lucide="user-plus" class="text-indigo-600"></i> Tambah Siswa Manual
+                                </h3>
+                                <hr>
+                                <div class="space-y-3">
+                                    <div>
+                                        <label class="block text-sm font-semibold text-slate-700 mb-1">Nama Siswa</label>
+                                        <input type="text" x-model="studentForm.nama" placeholder="Contoh: ADRIAN SYAHPUTRA" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-semibold text-slate-700 mb-1">Nomor Pendaftaran</label>
+                                        <input type="text" x-model="studentForm.noPendaftaran" placeholder="Contoh: SMAN2-021" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-semibold font-mono">
+                                    </div>
+                                    <button @click="addStudentManual()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-lg transition text-sm">
+                                        Tambahkan Siswa
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- List Tabel Data Siswa -->
+                            <div class="lg:col-span-2 bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+                                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                                    <h3 class="text-lg font-bold text-slate-800">Daftar Akun Peserta Ujian</h3>
+                                    <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                                        <!-- Tombol Hapus Semua -->
+                                        <button @click="showDeleteAllConfirm = true; $nextTick(() => lucide.createIcons())" 
+                                                class="px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-bold rounded-lg flex items-center gap-1 border border-rose-200 transition"
+                                                title="Hapus semua pendaftar siswa secara permanen">
+                                            <i data-lucide="trash" class="w-3.5 h-3.5"></i> Hapus Semua
+                                        </button>
+                                        <div class="relative w-full sm:w-48">
+                                            <input type="text" x-model="searchQuery" placeholder="Cari nomor / nama..." class="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                                            <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+                                        </div>
+                                    </div>
+                                </div>
+                                <hr>
+                                <div class="overflow-x-auto rounded-xl border border-slate-100 max-h-96">
+                                    <table class="w-full text-left border-collapse">
+                                        <thead class="bg-slate-50 text-slate-500 text-xs font-bold uppercase">
+                                            <tr>
+                                                <th class="p-3">No</th>
+                                                <th class="p-3">No Pendaftaran</th>
+                                                <th class="p-3">Nama Siswa</th>
+                                                <th class="p-3">Status Login</th>
+                                                <th class="p-3 text-right">Aksi</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                                            <template x-for="(st, index) in filteredStudents()" :key="st.noPendaftaran">
+                                                <tr class="hover:bg-slate-50/50">
+                                                    <td class="p-3" x-text="index + 1"></td>
+                                                    <td class="p-3 font-semibold font-mono" x-text="st.noPendaftaran"></td>
+                                                    <td class="p-3 font-medium" x-text="st.nama"></td>
+                                                    <td class="p-3">
+                                                        <template x-if="st.hasLoggedIn">
+                                                            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
+                                                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Sudah Login
+                                                            </span>
+                                                        </template>
+                                                        <template x-if="!st.hasLoggedIn">
+                                                            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
+                                                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Belum Login
+                                                            </span>
+                                                        </template>
+                                                    </td>
+                                                    <td class="p-3 text-right space-x-1 whitespace-nowrap">
+                                                        <button @click="resetStudentLogin(st.noPendaftaran)" class="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold rounded border border-amber-200 transition" title="Reset status login agar siswa bisa login lagi">
+                                                            Reset Login
+                                                        </button>
+                                                        <button @click="deleteStudent(st.noPendaftaran)" class="p-1 hover:bg-rose-100 text-rose-600 rounded transition" title="Hapus Siswa">
+                                                            <i data-lucide="trash" class="w-4 h-4 inline"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            </template>
+                                            <template x-if="filteredStudents().length === 0">
+                                                <tr>
+                                                    <td colspan="5" class="p-8 text-center text-slate-400 font-medium">Data siswa tidak ditemukan / masih kosong.</td>
+                                                </tr>
+                                            </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- TAB 4: IMPORT DATA EXCEL & EXPORT TEMPLATE -->
+                    <div x-show="adminTab === 'import'" class="space-y-6">
+                        <div class="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-slate-800">Impor Data Siswa via Excel</h2>
+                                <p class="text-sm text-slate-500">Unggah ribuan data siswa sekaligus dengan file Excel (.xlsx / .xls).</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Download Template Excel -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col justify-between">
+                                <div class="space-y-3">
+                                    <div class="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                                        <i data-lucide="download-cloud" class="w-6 h-6"></i>
+                                    </div>
+                                    <h3 class="text-lg font-bold text-slate-800">Unduh Template Ujian</h3>
+                                    <p class="text-sm text-slate-500 leading-relaxed">
+                                        Unduh format Excel yang sudah diatur dengan judul kolom yang sesuai untuk diimpor. Gunakan format kolom <strong>No Pendaftaran</strong> dan <strong>Nama</strong>.
+                                    </p>
+                                </div>
+                                <button @click="downloadTemplate()" class="mt-6 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition">
+                                    <i data-lucide="file-down" class="w-5 h-5"></i> Download Template Excel (.xlsx)
+                                </button>
+                            </div>
+
+                            <!-- Area Unggah / Import File -->
+                            <div class="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm flex flex-col justify-between">
+                                <div class="space-y-3">
+                                    <div class="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                                        <i data-lucide="upload-cloud" class="w-6 h-6"></i>
+                                    </div>
+                                    <h3 class="text-lg font-bold text-slate-800">Unggah Berkas Excel</h3>
+                                    <p class="text-sm text-slate-500 leading-relaxed">
+                                        Pilih berkas Excel yang sudah Anda isi sesuai template untuk mendaftarkan siswa secara massal ke dalam sistem.
+                                    </p>
+                                </div>
+                                <div class="mt-6">
+                                    <label class="block w-full border-2 border-dashed border-indigo-200 hover:border-indigo-400 bg-indigo-50/20 hover:bg-indigo-50/50 rounded-xl p-4 text-center cursor-pointer transition">
+                                        <span class="text-sm font-semibold text-indigo-700">Pilih berkas Excel ujian...</span>
+                                        <input type="file" @change="importExcel($event)" accept=".xlsx, .xls" class="hidden">
+                                    </label>
+                                    <p class="text-center text-xs text-slate-400 mt-2">Mendukung format file .xlsx dan .xls</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </main>
+            </div>
+
+            <!-- 5. HALAMAN UTAMA UJIAN (FULLSCREEN CBT EXAM WORKSPACE) -->
+            <div class="flex-grow flex flex-col bg-slate-900 text-white overflow-hidden relative" x-show="currentView === 'exam'" x-cloak>
+                
+                <!-- HEADER UJIAN (Informasi Peserta & Timer) -->
+                <header class="bg-slate-950 p-4 border-b border-slate-800 flex flex-col md:flex-row justify-between items-center gap-4 shrink-0">
+                    <!-- Data Diri Siswa -->
+                    <div class="flex items-center gap-4">
+                        <div class="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center">
+                            <i data-lucide="user" class="w-5 h-5 text-indigo-400"></i>
+                        </div>
+                        <div>
+                            <span class="text-xs uppercase text-slate-400 tracking-wider font-bold">Peserta Ujian</span>
+                            <div class="text-base font-bold flex items-center gap-2">
+                                <span x-text="currentStudent ? currentStudent.nama : ''"></span>
+                                <span class="text-xs font-mono px-2 py-0.5 bg-slate-800 text-slate-300 rounded" x-text="currentStudent ? currentStudent.noPendaftaran : ''"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Penanda Waktu Mundur -->
+                    <div class="flex items-center gap-3 bg-indigo-950/80 px-6 py-2.5 rounded-2xl border border-indigo-900/50">
+                        <div class="w-3 h-3 bg-emerald-500 rounded-full animate-ping"></div>
+                        <div class="text-right">
+                            <span class="text-[10px] text-indigo-400 block font-bold uppercase tracking-widest">Sisa Waktu Pengerjaan</span>
+                            <span class="text-xl font-black font-mono tracking-wider text-white" x-text="formatTime(timerSeconds)"></span>
+                        </div>
+                    </div>
+
+                    <!-- Tombol Selesai Ujian (Berwarna Merah Sesuai Permintaan) -->
+                    <div>
+                        <button @click="showFinishConfirm = true" class="bg-rose-600 hover:bg-rose-700 text-white font-black px-6 py-3 rounded-xl shadow-lg shadow-rose-600/30 transition text-sm flex items-center gap-2 uppercase tracking-wide">
+                            <i data-lucide="check-square" class="w-5 h-5"></i> Selesai Ujian
+                        </button>
+                    </div>
+                </header>
+
+                <!-- AREA MODAL KONFIRMASI SELESAI UJIAN -->
+                <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" x-show="showFinishConfirm" x-cloak>
+                    <div class="bg-white rounded-2xl max-w-md w-full p-6 text-center text-slate-800 shadow-2xl">
+                        <div class="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <i data-lucide="help-circle" class="w-10 h-10 text-rose-600"></i>
+                        </div>
+                        <h3 class="text-xl font-bold text-slate-800 mb-2">Selesaikan Ujian?</h3>
+                        <p class="text-slate-600 mb-6">Pastikan seluruh jawaban Anda di dalam lembar soal Google Form telah dikirimkan terlebih dahulu sebelum mengklik Selesai Ujian.</p>
+                        <div class="flex gap-3">
+                            <button @click="showFinishConfirm = false" class="w-1/2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 rounded-xl transition">
+                                Belum Selesai
+                            </button>
+                            <button @click="finishExam()" class="w-1/2 bg-rose-600 hover:bg-rose-700 text-white font-bold py-3 rounded-xl transition shadow-lg">
+                                Ya, Selesai
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SOAL SOAL / IFRAME WORKSPACE -->
+                <div class="flex-grow bg-slate-900 flex flex-col relative w-full h-full">
+                    <!-- Jika link soal tidak kosong, embed Google Form -->
+                    <template x-if="config.soalLink">
+                        <iframe :src="config.soalLink" class="w-full flex-grow block" allow="autoplay"></iframe>
+                    </template>
+                    <!-- Jika link soal kosong -->
+                    <template x-if="!config.soalLink">
+                        <div class="flex-grow flex flex-col items-center justify-center text-center p-8">
+                            <i data-lucide="alert-circle" class="w-16 h-16 text-rose-500 mb-4"></i>
+                            <h3 class="text-xl font-bold">Link Soal Belum Disiapkan</h3>
+                            <p class="text-slate-400 mt-2">Silakan hubungi administrator ujian untuk memperbarui link Google Form.</p>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- FLOATING WARNING COUNT -->
+                <div class="absolute bottom-4 left-4 bg-slate-950/90 text-slate-300 text-xs px-4 py-2 rounded-lg border border-slate-800 flex items-center gap-2">
+                    <i data-lucide="shield-alert" class="w-4 h-4 text-rose-500"></i>
+                    <span>Toleransi keluar tab: <strong class="text-rose-400"><span x-text="warningsCount"></span>/<span x-text="maxWarnings"></span></strong></span>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- FOOTER HALAMAN LUAR -->
+        <footer class="bg-slate-900 text-slate-400 text-xs text-center py-4 border-t border-slate-800" x-show="currentView !== 'exam' && currentView !== 'admin-dashboard'" x-cloak>
+            <p>&copy; 2026 SMA Negeri 2 Muara Enim. Hak Cipta Dilindungi.</p>
+        </footer>
+    </div>
+</body>
+</html>
